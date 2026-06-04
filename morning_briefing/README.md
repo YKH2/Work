@@ -1,116 +1,129 @@
-# Morning Briefing
+# Morning Briefing — Azure Function
 
-Fetches unread emails and today's calendar events from your Microsoft 365 account, generates a concise summary using Claude, and emails the briefing to you.
+Timer-triggered Azure Function that fetches your Outlook emails and calendar events, summarises them with Claude, and emails you a briefing at 7:30 AM AEST (Mon–Fri).
+
+Uses **app-only (client credentials) auth** — no interactive login, runs fully unattended in the cloud.
+
+---
 
 ## Prerequisites
 
-- Python 3.10+
-- A Microsoft 365 / Outlook account (ethan.yap@qualitas.com.au)
-- An Azure AD app registration (see below)
-- An Anthropic API key
+- Azure subscription
+- Microsoft 365 / Exchange Online mailbox
+- Anthropic API key
 
 ---
 
 ## 1. Register an Azure AD App
 
-1. Sign in to [portal.azure.com](https://portal.azure.com) with an admin or developer account in your tenant.
-2. Go to **Azure Active Directory → App registrations → New registration**.
-   - Name: `Morning Briefing` (or anything you like)
-   - Supported account types: **Accounts in this organizational directory only**
-   - Redirect URI: leave blank (not needed for device code flow)
-3. Click **Register**. Copy the **Application (client) ID** — this is `AZURE_CLIENT_ID`.
-4. Copy the **Directory (tenant) ID** from the Overview page — this is `AZURE_TENANT_ID`.
-5. Go to **Authentication** and enable **Allow public client flows** (toggle to Yes). Save.
-6. Go to **API permissions → Add a permission → Microsoft Graph → Delegated permissions**.
-   Add:
-   - `Mail.Read`
-   - `Mail.Send`
-   - `Calendars.Read`
-7. Click **Grant admin consent** (requires admin privileges), or have a tenant admin do this.
+1. Go to [Azure Portal → App registrations → New registration](https://portal.azure.com/#blade/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/RegisteredApps)
+2. Name it `morning-briefing`, leave defaults, click **Register**
+3. Note the **Application (client) ID** and **Directory (tenant) ID**
+4. Go to **Certificates & secrets → New client secret**, set an expiry, copy the secret value
+
+### API Permissions (Application, not Delegated)
+
+Add these **Application** permissions and grant admin consent:
+
+| Permission | Type | Purpose |
+|---|---|---|
+| `Mail.Read` | Application | Read inbox |
+| `Mail.Send` | Application | Send briefing email |
+| `Calendars.Read` | Application | Read calendar |
+
+> **Admin consent required.** An M365 admin must click **Grant admin consent** for your tenant.
 
 ---
 
-## 2. Set Up Environment Variables
-
-Copy the example file and fill in your values:
+## 2. Create the Azure Function App
 
 ```bash
-cp .env.example .env
-```
+# Install Azure Functions Core Tools if needed
+npm install -g azure-functions-core-tools@4
 
-Edit `.env`:
+# Create a resource group and storage account
+az group create --name morning-briefing-rg --location australiaeast
+az storage account create --name mbriefstorage --resource-group morning-briefing-rg --sku Standard_LRS
 
-```
-AZURE_CLIENT_ID=<your app's client ID>
-AZURE_TENANT_ID=<your tenant ID>
-ANTHROPIC_API_KEY=<your Anthropic API key>
+# Create the Function App (Python 3.11)
+az functionapp create \
+  --resource-group morning-briefing-rg \
+  --consumption-plan-location australiaeast \
+  --runtime python \
+  --runtime-version 3.11 \
+  --functions-version 4 \
+  --name morning-briefing-fn \
+  --storage-account mbriefstorage \
+  --os-type linux
 ```
 
 ---
 
-## 3. Install Dependencies
+## 3. Configure Application Settings
+
+```bash
+az functionapp config appsettings set \
+  --name morning-briefing-fn \
+  --resource-group morning-briefing-rg \
+  --settings \
+    AZURE_CLIENT_ID="<your-client-id>" \
+    AZURE_TENANT_ID="<your-tenant-id>" \
+    AZURE_CLIENT_SECRET="<your-client-secret>" \
+    ANTHROPIC_API_KEY="<your-anthropic-key>"
+```
+
+---
+
+## 4. Deploy
+
+```bash
+cd morning_briefing
+func azure functionapp publish morning-briefing-fn
+```
+
+---
+
+## 5. Schedule
+
+The function runs on cron schedule `0 30 21 * * 1-5` (UTC), which is **7:30 AM AEST Mon–Fri**.
+
+To change the time, edit the `schedule` parameter in `function_app.py`:
+
+```
+"0 30 21 * * 1-5"
+ |  |  |  |  |  +-- Mon-Fri
+ |  |  |  +--------- every month
+ |  |  +------------ 21:00 UTC = 07:00 AEST  (change this hour)
+ |  +--------------- :30 minutes
+ +------------------ :00 seconds
+```
+
+---
+
+## Local development
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
+Create `local.settings.json` (not committed):
 
-## 4. First Run (Device Code Authentication)
-
-On the first run the script will print a URL and a one-time code:
-
+```json
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AZURE_CLIENT_ID": "...",
+    "AZURE_TENANT_ID": "...",
+    "AZURE_CLIENT_SECRET": "...",
+    "ANTHROPIC_API_KEY": "..."
+  }
+}
 ```
-To sign in, use a web browser to open the page https://microsoft.com/devicelogin
-and enter the code XXXXXXXXX to authenticate.
-```
 
-Open the URL in your browser, enter the code, and sign in with `ethan.yap@qualitas.com.au`. After successful authentication the token is cached at `~/.morning_briefing_token_cache.json` and subsequent runs skip the browser step.
+Then run:
 
 ```bash
-python briefing.py
+func start
 ```
-
----
-
-## 5. Schedule with Cron
-
-To run the briefing automatically every weekday at 7:30 AM:
-
-```bash
-crontab -e
-```
-
-Add:
-
-```cron
-30 7 * * 1-5 /usr/bin/python3 /home/user/Work/morning_briefing/briefing.py >> /home/user/Work/morning_briefing/briefing.log 2>&1
-```
-
-Adjust the Python path as needed (`which python3` to find it). The script uses `.env` in its own directory, so make sure `python-dotenv` is installed in the environment that cron uses, or export the variables directly in your crontab:
-
-```cron
-30 7 * * 1-5 AZURE_CLIENT_ID=xxx AZURE_TENANT_ID=yyy ANTHROPIC_API_KEY=zzz /usr/bin/python3 /home/user/Work/morning_briefing/briefing.py
-```
-
----
-
-## Token Cache
-
-The MSAL token cache is stored at `~/.morning_briefing_token_cache.json`. It contains refresh tokens that allow silent re-authentication without the device code flow. Protect this file:
-
-```bash
-chmod 600 ~/.morning_briefing_token_cache.json
-```
-
-If you ever need to force re-authentication (e.g. after changing API permissions), delete the cache file and run the script again.
-
----
-
-## Output
-
-The script sends an HTML email to `ethan.yap@qualitas.com.au` with three sections:
-
-- **Today's Calendar** — all events for today with times and locations
-- **Email Summary** — unread emails from the last 24 hours, grouped by priority
-- **Action Items** — extracted follow-ups and tasks from your inbox
