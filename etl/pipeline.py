@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ETL Pipeline — Excel → PostgreSQL
+ETL Pipeline — Excel → PostgreSQL (star schema)
 Usage: python pipeline.py <path_to_excel_file>
 """
 
@@ -21,13 +21,20 @@ def run(filepath: str) -> None:
     for name, df in frames.items():
         print(f"  {name}: {len(df):,} rows")
 
-    print("[transform] Cleaning data")
-    frames = transform(frames)
+    print("[transform] Cleaning data and building dimensions")
+    frames, dimensions = transform(frames)
+    for name, df in dimensions.items():
+        print(f"  {name}: {len(df):,} members")
 
     print("[load] Writing to PostgreSQL")
-    counts = load(frames, DATABASE_URL)
-    for table, count in counts.items():
-        print(f"  {table}: {count:,} rows loaded")
+    counts = load(frames, dimensions, DATABASE_URL)
+    print("  Dimensions:")
+    for name in dimensions:
+        tbl = name  # dim_entity etc.
+        print(f"    {tbl}: {counts.get(tbl, '?'):,} rows")
+    print("  Facts:")
+    for tbl in ["fact_financials", "raw_outputs", "fact_employee"]:
+        print(f"    {tbl}: {counts.get(tbl, '?'):,} rows")
 
     elapsed = time.time() - start
     print(f"[done] Completed in {elapsed:.1f}s")
